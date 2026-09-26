@@ -1,20 +1,65 @@
 # resolvepatch
 
-Patch Davinci Resolve Studio 18.x-20.x to think it's activated
+A Windows research patcher for DaVinci Resolve Studio, with patch paths for versions 18 through 21.
 
-~~**Some users are experiencing a rendering bug in versions >18.6.2. This is possibly an antipiracy measure. Resolve is incredibly annoying to analyze due to its size, and I am currently very busy, but I am planning to check this out further once I have the time. Either use 18.6.2 or render the output with padding to the top, then cut the padding back off with ffmpeg.**~~
-**I have released a patch to fix the patcher for 20.x versions. Please update to 20.x versions of Resolve and use the newest version of the patcher.**
+## Compatibility
 
-**Due to the very time consuming process of analyzing Resolve, and my current lack of time to spend on passion projects, updates may be very sporadic or not happen at all. There are time-tested versions that work (20.0.49, 18.6.2).**
+| Version | Status |
+| --- | --- |
+| 18.6.2 and 20.0.49 | Previously reported working by upstream; not retested for this change. |
+| Other 18.x–20.x builds | Existing patch paths; compatibility depends on matching signatures. |
+| 21.0.0 / 21.0.4+ | Existing v21 signature variants; not separately tested for this change. |
+| **21.1.0.14 (Windows)** | **A local patch run succeeded:** the v21 dialog pattern, all five render-guard patterns, and the Dolby Vision patch completed. Application startup, editing, rendering, and Dolby Vision output have **not** been verified. |
+| Earlier than 18 or later than 21 | Rejected; no compatibility claim. |
 
-## Instructions
+Version 21 support was already present in the source. This update documents it and improves execution safety; it does not introduce or independently validate those signatures. A successful patch run is not proof that every Studio feature works. Missing or ambiguous required signatures abort before the executable is written. Already-patched executables are rejected rather than reported as newly patched.
 
-- Go to the [Support Page](https://www.blackmagicdesign.com/support/family/davinci-resolve-and-fusion) and find your desired version of Davinci Resolve **Studio**. Ideally 20.x or 18.6.2.
-- Install Davinci Resolve Studio
-- Run the precompiled release **OR** [install Rust](https://rustup.rs/), install nightly with `rustup toolchain install nightly --profile minimal`, and run `cargo +nightly run --release --locked` in the project folder. The pattern-search dependency requires nightly Rust.
-- For a custom installation directory, pass the executable path: `cargo +nightly run --release --locked -- "F:\davinci\Resolve.exe"`.
-- If using 20.x or above, and the code fails to set the environment variable globally, set a global environment var called `RLM_LICENSE` to `blackmagic.lic`.
-- Done
+## Build
+
+Install [Rust](https://rustup.rs/) on Windows with the MSVC build prerequisites. The `coolfindpattern` dependency requires nightly Rust.
+
+```powershell
+rustup toolchain install nightly --profile minimal
+cargo +nightly build --release --locked
+```
+
+The executable is `target\release\resolvepatch.exe`. Nightly Rust 1.100.0 (2026-09-26 toolchain) was used for this change.
+
+## Usage
+
+Close Resolve before applying changes. Installations under Program Files may require an elevated terminal for file access.
+
+```powershell
+# Inspect a custom installation without writing files or registry settings:
+.\target\release\resolvepatch.exe --dry-run "D:\Apps\DaVinci Resolve\Resolve.exe"
+
+# Apply to that installation:
+.\target\release\resolvepatch.exe "D:\Apps\DaVinci Resolve\Resolve.exe"
+
+# Or use automatic detection (file associations, then the default install path):
+.\target\release\resolvepatch.exe
+```
+
+`--help` prints usage. Exit code 0 means the requested operation completed; errors return a nonzero exit code. Dry runs still require an original, unpatched executable.
+
+## Backups and configuration
+
+- A backup is created as `Resolve.exe.bak` before writing the executable. Existing backups are never overwritten: move a verified backup to a separate safe location before deliberately patching a fresh installation again.
+- The license file is written alongside Resolve, preserving prior behavior for legacy versions as well.
+- `RLM_LICENSE` is configured in the current user's environment using the license file's absolute path. Sign out and back in so applications inherit the new value. This replaces the previous attempt to write through a read-only machine registry handle.
+- License configuration failure returns an error even if the executable has already been modified. The backup remains available. Executable writes are not atomic; restore the backup if a write is interrupted.
+
+To restore, close Resolve and copy the verified `Resolve.exe.bak` over `Resolve.exe`. Remove this tool's license file and user environment setting if no longer needed; preserve any unrelated configuration.
+
+## Development checks
+
+```powershell
+cargo +nightly fmt -- --check
+cargo +nightly test --locked
+cargo +nightly build --release --locked
+```
+
+Regression tests cover signed relative-call bounds, malformed file-association commands, and refusal to overwrite an existing backup. They do not validate Resolve's runtime behavior.
 
 ## Disclaimer
 

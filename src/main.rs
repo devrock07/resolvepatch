@@ -1,12 +1,15 @@
- use std::{
+use std::{
+    fs::OpenOptions,
+    io::Write,
     path::{Path, PathBuf},
+    process::ExitCode,
     str::FromStr,
 };
 
 use coolfindpattern::pattern;
 use pelite::pe::Pe;
 use simplelog::Config;
-use windows_registry::{CURRENT_USER, LOCAL_MACHINE};
+use windows_registry::CURRENT_USER;
 
 // ========================================================================
 // v21 DIALOG BYPASS — the missing piece!
@@ -40,14 +43,8 @@ fn patch_v21_dialog(data: &mut [u8]) -> Result<(), PatchError> {
     let occs: Vec<usize> = coolfindpattern::PatternSearcher::new(
         &data,
         pattern!(
-            0x40, 0x53,
-            0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00,
-            0xE8, _, _, _, _,
-            0x84, 0xC0,
-            0x74, 0x0B,
-            0xB0, 0x01,
-            0x48, 0x81, 0xC4, 0x80, 0x00, 0x00, 0x00,
-            0x5B, 0xC3
+            0x40, 0x53, 0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00, 0xE8, _, _, _, _, 0x84, 0xC0,
+            0x74, 0x0B, 0xB0, 0x01, 0x48, 0x81, 0xC4, 0x80, 0x00, 0x00, 0x00, 0x5B, 0xC3
         ),
     )
     .collect();
@@ -55,7 +52,10 @@ fn patch_v21_dialog(data: &mut [u8]) -> Result<(), PatchError> {
     match occs.len() {
         1 => {
             let addr = occs[0];
-            log::info!("v21 dialog bypass (v21.0.4+): patching at offset 0x{:08X}", addr);
+            log::info!(
+                "v21 dialog bypass (v21.0.4+): patching at offset 0x{:08X}",
+                addr
+            );
             data[addr + 16] = 0x90; // NOP (was JE)
             data[addr + 17] = 0x90; // NOP
             Ok(())
@@ -75,28 +75,24 @@ fn patch_v21_dialog_v2100(data: &mut [u8]) -> Result<(), PatchError> {
     let searcher = coolfindpattern::PatternSearcher::new(
         &data,
         pattern!(
-            0x48, 0x89, 0x5C, 0x24, 0x10, 0x57,
-            0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00,
-            0x33, 0xDB, 0x33, 0xC9,
-            0xE8, _, _, _, _,
-            0x84, 0xC0,
-            0x0F, 0x85, _, _, _, _
+            0x48, 0x89, 0x5C, 0x24, 0x10, 0x57, 0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00, 0x33,
+            0xDB, 0x33, 0xC9, 0xE8, _, _, _, _, 0x84, 0xC0, 0x0F, 0x85, _, _, _, _
         ),
     );
 
     let occs: Vec<usize> = searcher.collect();
 
     match occs.len() {
-        0 => {
-            log::warn!("v21 dialog bypass: pattern not found (may already be patched)");
-            Ok(())
-        }
+        0 => Err(PatchError::NoSignatureFound),
         1 => {
             let addr = occs[0];
             // Replace bytes 24-25 (0F 85 = JNE) with (90 E9 = NOP + JMP)
             // Bytes 26-29 (the rel32 displacement) are left intact,
             // so the JMP lands exactly where the JNE would have.
-            log::info!("v21 dialog bypass (v21.0.0): patching at offset 0x{:08X}", addr);
+            log::info!(
+                "v21 dialog bypass (v21.0.0): patching at offset 0x{:08X}",
+                addr
+            );
             data[addr + 24] = 0x90; // NOP
             data[addr + 25] = 0xE9; // JMP rel32
             // bytes 26..30 stay as-is (original displacement)
@@ -138,11 +134,7 @@ fn patch_4func(data: &mut [u8]) -> Result<(), PatchError> {
             data[call_addr + 4],
         ];
 
-        let offset = u32::from_le_bytes(bytes);
-
-        let addr = call_addr + 5 + offset as usize;
-
-        addr
+        relative_target(*call_addr, i32::from_le_bytes(bytes), data.len())?
     };
 
     // v21 FIX: In Resolve 21, Blackmagic added 3 extra Dolby Vision license
@@ -163,8 +155,12 @@ fn patch_4func(data: &mut [u8]) -> Result<(), PatchError> {
         ),
     ];
 
+    let end = addr
+        .checked_add(0x1000)
+        .filter(|end| *end <= data.len())
+        .ok_or(PatchError::ComplexFuncPatchFailed)?;
     for (pat, repl, idxs) in LOCAL_PATCHES {
-        let searcher = coolfindpattern::PatternSearcher::new(&data[addr..addr + 0x1000], pat);
+        let searcher = coolfindpattern::PatternSearcher::new(&data[addr..end], pat);
 
         let occs: Vec<usize> = searcher.collect();
 
@@ -178,6 +174,13 @@ fn patch_4func(data: &mut [u8]) -> Result<(), PatchError> {
     }
 
     Ok(())
+}
+
+fn relative_target(call: usize, displacement: i32, len: usize) -> Result<usize, PatchError> {
+    call.checked_add(5)
+        .and_then(|next| next.checked_add_signed(displacement as isize))
+        .filter(|target| *target < len)
+        .ok_or(PatchError::ComplexFuncPatchFailed)
 }
 
 // ========================================================================
@@ -252,19 +255,17 @@ fn configure_license_file(path: &str) -> Result<(), PatchError> {
 
     std::fs::write(&path, LIC_FILE).map_err(|_| PatchError::LicenseFileError)?;
 
-    let key = LOCAL_MACHINE
-        .open(r#"System\CurrentControlSet\Control\Session Manager\Environment"#)
-        .map_err(|e| {
-            log::error!("failed to set global environment variable RLM_LICENSE=blackmagic.lic. please set manually!!! {e}");
-            PatchError::LicenseFileError
-        })?;
-
-    key.set_string("RLM_LICENSE", "blackmagic.lic")
-        .map_err(|e| {
-            log::error!("failed to set global environment variable RLM_LICENSE=blackmagic.lic. please set manually!!! {e}");
-            PatchError::LicenseFileError
-        })?;
-
+    let absolute = std::path::absolute(&path).map_err(|_| PatchError::LicenseFileError)?;
+    let value = absolute.to_str().ok_or(PatchError::LicenseFileError)?;
+    // create() opens with write access; open() is read-only in windows-registry.
+    let key = CURRENT_USER
+        .create("Environment")
+        .map_err(|_| PatchError::LicenseFileError)?;
+    key.set_string("RLM_LICENSE", value).map_err(|e| {
+        log::error!("failed to set user RLM_LICENSE: {e}");
+        PatchError::LicenseFileError
+    })?;
+    log::info!("User RLM_LICENSE set. Sign out and back in before launching Resolve.");
     Ok(())
 }
 
@@ -276,16 +277,24 @@ enum PatchError {
     SignatureOccurrenceMismatch(usize),
     #[error("This version of Resolve is either not compatible or was already patched.")]
     NoSignatureFound,
-    #[error("Unable to backup Resolve.exe.")]
+    #[error(
+        "Unable to create backup (it may already exist); existing backups are never overwritten."
+    )]
     BackupFailed,
     #[error("Unable to write patched Resolve.exe back.")]
     WriteFailed,
     #[error("Failed to parse PE header for main executable.")]
     InvalidPE,
-    #[error("Failed to configure license file")]
+    #[error(
+        "Executable was modified, but license configuration failed; the backup is available for recovery."
+    )]
     LicenseFileError,
     #[error("Could not patch complex function.")]
     ComplexFuncPatchFailed,
+    #[error("Unsupported Resolve major version: {0} (expected 18 through 21).")]
+    UnsupportedVersion(u16),
+    #[error("Usage: resolvepatch [--dry-run] [path-to-Resolve.exe]")]
+    InvalidArguments,
 }
 
 fn determine_version(data: &[u8]) -> Result<(u16, u16, u16), PatchError> {
@@ -303,21 +312,27 @@ fn determine_version(data: &[u8]) -> Result<(u16, u16, u16), PatchError> {
     Ok((version.Major, version.Minor, version.Patch))
 }
 
-fn patch(resolve_path: &str) -> Result<(), PatchError> {
+fn patch(resolve_path: &str, dry_run: bool) -> Result<(), PatchError> {
     let Ok(mut data) = std::fs::read(resolve_path) else {
         Err(PatchError::ResolveNotFound)?
     };
 
     let version = determine_version(&data)?;
-    log::info!("detected version: {}.{}.{}", version.0, version.1, version.2);
+    log::info!(
+        "detected version: {}.{}.{}",
+        version.0,
+        version.1,
+        version.2
+    );
+    if !(18..=21).contains(&version.0) {
+        return Err(PatchError::UnsupportedVersion(version.0));
+    }
 
     // STEP 1: v21 dialog bypass (new — not in original unknowntrojan code)
     if version.0 >= 21 {
         log::info!("applying v21 dialog bypass...");
-        match patch_v21_dialog(&mut data) {
-            Ok(_) => log::info!("v21 dialog bypass: OK"),
-            Err(e) => log::warn!("v21 dialog bypass failed: {e} (continuing)"),
-        }
+        patch_v21_dialog(&mut data)?;
+        log::info!("v21 dialog bypass: OK");
     }
 
     // STEP 2: render guard patches (unknowntrojan's 5 signatures)
@@ -348,7 +363,7 @@ fn patch(resolve_path: &str) -> Result<(), PatchError> {
 
         match occs.len() {
             0 => {
-                log::info!("patch[{}]: no match (may already be patched)", i);
+                return Err(PatchError::NoSignatureFound);
             }
             1 => {
                 let addr = occs[0];
@@ -357,7 +372,7 @@ fn patch(resolve_path: &str) -> Result<(), PatchError> {
                 patched = true;
             }
             n => {
-                log::warn!("patch[{}]: matched {} times — skipping", i, n);
+                return Err(PatchError::SignatureOccurrenceMismatch(n));
             }
         }
     }
@@ -365,54 +380,104 @@ fn patch(resolve_path: &str) -> Result<(), PatchError> {
     // STEP 3: Dolby Vision fix (patch_4func)
     if version.0 >= 20 {
         log::info!("applying patch_4func (Dolby Vision)...");
-        match patch_4func(&mut data) {
-            Ok(_) => {
-                log::info!("patch_4func: OK");
-                patched = true;
-            }
-            Err(e) => log::warn!("patch_4func: {} (continuing)", e),
-        }
+        patch_4func(&mut data)?;
+        log::info!("patch_4func: OK");
     }
 
     if !patched {
         Err(PatchError::NoSignatureFound)?
     }
 
-    let Ok(_) = std::fs::copy(resolve_path, &format!("{resolve_path}.bak")) else {
-        Err(PatchError::BackupFailed)?
-    };
+    if dry_run {
+        log::info!("Dry run passed; no files or environment settings changed.");
+        return Ok(());
+    }
+
+    create_backup(Path::new(resolve_path))?;
 
     let Ok(_) = std::fs::write(resolve_path, data) else {
         Err(PatchError::WriteFailed)?
     };
 
-    let _ = configure_license_file(resolve_path);
+    configure_license_file(resolve_path)?;
 
     Ok(())
 }
 
-fn main() {
+fn create_backup(path: &Path) -> Result<(), PatchError> {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".bak");
+    let backup_path = PathBuf::from(name);
+    let mut source = std::fs::File::open(path).map_err(|_| PatchError::BackupFailed)?;
+    // Refuse existing backups, including symlinks, instead of overwriting originals.
+    let mut backup = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&backup_path)
+        .map_err(|_| PatchError::BackupFailed)?;
+    if std::io::copy(&mut source, &mut backup)
+        .and_then(|_| backup.flush())
+        .and_then(|_| backup.sync_all())
+        .is_err()
+    {
+        drop(backup);
+        let _ = std::fs::remove_file(backup_path);
+        return Err(PatchError::BackupFailed);
+    }
+    Ok(())
+}
+
+fn main() -> ExitCode {
     let _ = simplelog::SimpleLogger::init(log::LevelFilter::Info, Config::default());
 
     log::info!("attempting to patch resolve!");
 
-    let Ok(path) = locate() else {
-        log::error!("unable to find resolve....");
-        return;
-    };
-
-    log::info!("target: {}", path);
-
-    match patch(&path) {
-        Ok(_) => {
-            log::info!("successfully patched!");
-        }
-        Err(e) => {
-            log::error!("failed to patch resolve: {e}")
+    let mut dry_run = false;
+    let mut explicit_path = None;
+    for argument in std::env::args().skip(1) {
+        match argument.as_str() {
+            "--help" | "-h" => {
+                println!("Usage: resolvepatch [--dry-run] [path-to-Resolve.exe]");
+                return ExitCode::SUCCESS;
+            }
+            "--dry-run" => dry_run = true,
+            _ if argument.starts_with('-') || explicit_path.is_some() => {
+                log::error!("{}", PatchError::InvalidArguments);
+                return ExitCode::FAILURE;
+            }
+            _ => explicit_path = Some(argument),
         }
     }
+    let result = locate(explicit_path).and_then(|path| {
+        log::info!("target: {path}");
+        patch(&path, dry_run)
+    });
+    match result {
+        Ok(()) => {
+            log::info!(
+                "{}",
+                if dry_run {
+                    "Validation complete."
+                } else {
+                    "Successfully patched and configured."
+                }
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            log::error!("failed: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
 
-    std::thread::sleep(std::time::Duration::from_secs(5));
+fn executable_from_command(command: &str) -> Option<&str> {
+    command
+        .trim()
+        .strip_prefix('"')?
+        .split_once('"')
+        .map(|(path, _)| path)
+        .filter(|path| !path.is_empty())
 }
 
 fn path_from_shellopen() -> Option<String> {
@@ -420,7 +485,7 @@ fn path_from_shellopen() -> Option<String> {
         if let Ok(key) =
             CURRENT_USER.open(format!(r#"Software\Classes\{}\shell\open\command"#, typ))
             && let Ok(key) = key.get_string("")
-            && let key = &key[1..key.len() - 6]
+            && let Some(key) = executable_from_command(&key)
             && Path::new(key).exists()
         {
             Some(key.to_string())
@@ -443,8 +508,8 @@ fn path_from_shellopen() -> Option<String> {
         .next()
 }
 
-fn locate() -> Result<String, PatchError> {
-    if let Some(path) = std::env::args().nth(1) {
+fn locate(explicit_path: Option<String>) -> Result<String, PatchError> {
+    if let Some(path) = explicit_path {
         return if Path::new(&path).is_file() {
             Ok(path)
         } else {
@@ -464,5 +529,57 @@ fn locate() -> Result<String, PatchError> {
         } else {
             Err(PatchError::ResolveNotFound)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_calls_handle_negative_offsets_and_reject_out_of_bounds() {
+        assert_eq!(relative_target(20, -10, 100).unwrap(), 15);
+        assert_eq!(relative_target(20, 10, 100).unwrap(), 35);
+        assert!(relative_target(0, -6, 100).is_err());
+        assert!(relative_target(20, 75, 100).is_err());
+        assert!(relative_target(usize::MAX, 0, 100).is_err());
+    }
+
+    #[test]
+    fn association_parser_handles_arguments_and_malformed_commands() {
+        assert_eq!(
+            executable_from_command(r#""C:\Program Files\Resolve.exe" "%1""#),
+            Some(r"C:\Program Files\Resolve.exe")
+        );
+        assert_eq!(
+            executable_from_command(r#""D:\Resolve.exe" --flag "%1""#),
+            Some(r"D:\Resolve.exe")
+        );
+        for malformed in ["", "\"", "\"\"", "unquoted.exe", "\"unterminated"] {
+            assert_eq!(executable_from_command(malformed), None);
+        }
+    }
+
+    #[test]
+    fn backup_keeps_original_and_refuses_second_write() {
+        let directory = std::env::temp_dir().join(format!(
+            "resolvepatch-backup-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let source = directory.join("Resolve.exe");
+        let backup = directory.join("Resolve.exe.bak");
+        std::fs::write(&source, b"original").unwrap();
+        create_backup(&source).unwrap();
+        std::fs::write(&source, b"modified").unwrap();
+        assert!(create_backup(&source).is_err());
+        assert_eq!(std::fs::read(&backup).unwrap(), b"original");
+        std::fs::remove_file(source).unwrap();
+        std::fs::remove_file(backup).unwrap();
+        std::fs::remove_dir(directory).unwrap();
     }
 }
