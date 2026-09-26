@@ -11,7 +11,8 @@ Patch Davinci Resolve Studio 18.x-20.x to think it's activated
 
 - Go to the [Support Page](https://www.blackmagicdesign.com/support/family/davinci-resolve-and-fusion) and find your desired version of Davinci Resolve **Studio**. Ideally 20.x or 18.6.2.
 - Install Davinci Resolve Studio
-- Run the precompiled release **OR** [install Rust](https://rustup.rs/) and run `cargo run` in the project folder
+- Run the precompiled release **OR** [install Rust](https://rustup.rs/), install nightly with `rustup toolchain install nightly --profile minimal`, and run `cargo +nightly run --release --locked` in the project folder. The pattern-search dependency requires nightly Rust.
+- For a custom installation directory, pass the executable path: `cargo +nightly run --release --locked -- "F:\davinci\Resolve.exe"`.
 - If using 20.x or above, and the code fails to set the environment variable globally, set a global environment var called `RLM_LICENSE` to `blackmagic.lic`.
 - Done
 

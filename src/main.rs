@@ -444,6 +444,14 @@ fn path_from_shellopen() -> Option<String> {
 }
 
 fn locate() -> Result<String, PatchError> {
+    if let Some(path) = std::env::args().nth(1) {
+        return if Path::new(&path).is_file() {
+            Ok(path)
+        } else {
+            Err(PatchError::ResolveNotFound)
+        };
+    }
+
     if let Some(path) = path_from_shellopen() {
         log::info!("Resolve found via regkey: {path}");
         Ok(path)
