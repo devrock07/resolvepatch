@@ -2,7 +2,7 @@ use std::{
     fs::OpenOptions,
     io::Write,
     path::{Path, PathBuf},
-    process::ExitCode,
+    process::{Command, ExitCode},
     str::FromStr,
 };
 
@@ -293,7 +293,9 @@ enum PatchError {
     ComplexFuncPatchFailed,
     #[error("Unsupported Resolve major version: {0} (expected 18 through 21).")]
     UnsupportedVersion(u16),
-    #[error("Usage: resolvepatch [--dry-run] [path-to-Resolve.exe]")]
+    #[error("Personal theme failed: {0}")]
+    ThemeError(String),
+    #[error("Usage: resolvepatch [--dry-run] [--theme-only | --no-theme] [path-to-Resolve.exe]")]
     InvalidArguments,
 }
 
@@ -427,20 +429,80 @@ fn create_backup(path: &Path) -> Result<(), PatchError> {
     Ok(())
 }
 
+fn theme_script() -> Result<PathBuf, PatchError> {
+    if let Some(directory) = std::env::var_os("RESOLVEPATCH_PERSONAL_DIR") {
+        let script = PathBuf::from(directory).join("theme.py");
+        return script.is_file().then_some(script).ok_or_else(|| {
+            PatchError::ThemeError("RESOLVEPATCH_PERSONAL_DIR must contain theme.py".into())
+        });
+    }
+    let executable = std::env::current_exe().map_err(|e| PatchError::ThemeError(e.to_string()))?;
+    executable
+        .parent()
+        .into_iter()
+        .flat_map(|parent| parent.ancestors().take(3))
+        .map(|parent| parent.join("personal").join("theme.py"))
+        .find(|script| script.is_file())
+        .ok_or_else(|| PatchError::ThemeError(
+            "Keep the personal folder beside resolvepatch.exe, or run from the built repository".into()
+        ))
+}
+
+fn run_theme(path: &str, dry_run: bool, check_closed: bool) -> Result<(), PatchError> {
+    let script = theme_script()?;
+    let candidates = if let Some(python) = std::env::var_os("RESOLVEPATCH_PYTHON") {
+        vec![(python, false)]
+    } else {
+        vec![("py".into(), true), ("python".into(), false)]
+    };
+    for (python, launcher) in candidates {
+        let mut command = Command::new(python);
+        if launcher {
+            command.arg("-3");
+        }
+        command.arg(&script).arg(path);
+        if dry_run {
+            command.arg("--dry-run");
+        }
+        if check_closed {
+            command.arg("--check-closed");
+        }
+        match command.status() {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => {
+                return Err(PatchError::ThemeError(format!(
+                    "installer returned {status}; see its diagnostic above"
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(PatchError::ThemeError(error.to_string())),
+        }
+    }
+    Err(PatchError::ThemeError(
+        "Install Python 3.10+ or set RESOLVEPATCH_PYTHON".into(),
+    ))
+}
+
 fn main() -> ExitCode {
     let _ = simplelog::SimpleLogger::init(log::LevelFilter::Info, Config::default());
 
     log::info!("attempting to patch resolve!");
 
     let mut dry_run = false;
+    let mut theme_only = false;
+    let mut no_theme = false;
     let mut explicit_path = None;
     for argument in std::env::args().skip(1) {
         match argument.as_str() {
             "--help" | "-h" => {
-                println!("Usage: resolvepatch [--dry-run] [path-to-Resolve.exe]");
+                println!(
+                    "Usage: resolvepatch [--dry-run] [--theme-only | --no-theme] [path-to-Resolve.exe]\nPersonal branch: validates and applies Blackpink after patching by default.\n--theme-only reapplies just the theme; --no-theme uses the original patch workflow.\nRequires Python 3.10+ and the personal folder for theming."
+                );
                 return ExitCode::SUCCESS;
             }
             "--dry-run" => dry_run = true,
+            "--theme-only" => theme_only = true,
+            "--no-theme" => no_theme = true,
             _ if argument.starts_with('-') || explicit_path.is_some() => {
                 log::error!("{}", PatchError::InvalidArguments);
                 return ExitCode::FAILURE;
@@ -448,9 +510,27 @@ fn main() -> ExitCode {
             _ => explicit_path = Some(argument),
         }
     }
+    if theme_only && no_theme {
+        log::error!("--theme-only and --no-theme cannot be combined");
+        return ExitCode::FAILURE;
+    }
     let result = locate(explicit_path).and_then(|path| {
         log::info!("target: {path}");
-        patch(&path, dry_run)
+        if theme_only {
+            return run_theme(&path, dry_run, !dry_run);
+        }
+        // Validate the entire personal profile before the original patch writes anything.
+        if !no_theme {
+            run_theme(&path, true, !dry_run)?;
+        }
+        patch(&path, dry_run)?;
+        if !no_theme && !dry_run {
+            run_theme(&path, false, true).map_err(|error| {
+                log::error!("The original patch completed, but theming failed. Fix the reported issue, then use --theme-only. Theme backups are retained.");
+                error
+            })?;
+        }
+        Ok(())
     });
     match result {
         Ok(()) => {
@@ -458,8 +538,12 @@ fn main() -> ExitCode {
                 "{}",
                 if dry_run {
                     "Validation complete."
-                } else {
+                } else if theme_only {
+                    "Personal theme complete."
+                } else if no_theme {
                     "Successfully patched and configured."
+                } else {
+                    "Successfully patched, configured, and themed."
                 }
             );
             ExitCode::SUCCESS

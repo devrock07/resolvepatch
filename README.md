@@ -1,66 +1,65 @@
-# resolvepatch
+# resolvepatch — devrock07's personal Blackpink branch
 
-A Windows research patcher for DaVinci Resolve Studio, with patch paths for versions 18 through 21.
+Personal customization branch for my Windows Resolve setup. **Public fork, personal branch; no upstream merge intended.** The existing patch command now validates and applies my saved Blackpink theme after its original patch operation succeeds.
 
-## Compatibility
+Verified for **DaVinci Resolve Studio 21.1.0.14, Windows x64** only: black panels, pink/rose controls, Fusion colors, pink Project Manager selection borders/tab graphics, and the anime banner with violet eyes and a layered pink bob.
 
-| Version | Status |
-| --- | --- |
-| 18.6.2 and 20.0.49 | Previously reported working by upstream; not retested for this change. |
-| Other 18.x–20.x builds | Existing patch paths; compatibility depends on matching signatures. |
-| 21.0.0 / 21.0.4+ | Existing v21 signature variants; not separately tested for this change. |
-| **21.1.0.14 (Windows)** | **A local patch run succeeded:** the v21 dialog pattern, all five render-guard patterns, and the Dolby Vision patch completed. Application startup, editing, rendering, and Dolby Vision output have **not** been verified. |
-| Earlier than 18 or later than 21 | Rejected; no compatibility claim. |
+![Personal loading artwork](personal/banner-pink-bob.png)
 
-Version 21 support was already present in the source. This update documents it and improves execution safety; it does not introduce or independently validate those signatures. A successful patch run is not proof that every Studio feature works. Missing or ambiguous required signatures abort before the executable is written. Already-patched executables are rejected rather than reported as newly patched.
+Some timeline clip colors and other embedded orange icons remain independent of this theme. This is not a claim that every Resolve pixel is pink.
 
-## Build
+## Build and run
 
-Install [Rust](https://rustup.rs/) on Windows with the MSVC build prerequisites. The `coolfindpattern` dependency requires nightly Rust.
+Requires Windows, Python 3.10+ (standard library only), and nightly Rust with MSVC build tools. Applying the saved theme needs no API key or network connection.
 
 ```powershell
+git switch personal-blackpink
 rustup toolchain install nightly --profile minimal
-cargo +nightly build --release --locked
+.\build-personal.ps1
+
+# Inspect an existing installation without writes:
+.\target\personal-bundle\resolvepatch.exe --theme-only --dry-run "F:\davinci\Resolve.exe"
+
+# Close Resolve, then reapply just the theme:
+.\target\personal-bundle\resolvepatch.exe --theme-only "F:\davinci\Resolve.exe"
+
+# Fresh compatible installation: original patch, then theme automatically:
+.\target\personal-bundle\resolvepatch.exe "F:\davinci\Resolve.exe"
 ```
 
-The executable is `target\release\resolvepatch.exe`. Nightly Rust 1.100.0 (2026-09-26 toolchain) was used for this change.
+Keep `personal/` beside the distributed executable. A direct `cargo +nightly build --release --locked` also works inside this checkout. `RESOLVEPATCH_PERSONAL_DIR` selects a custom profile folder; `RESOLVEPATCH_PYTHON` selects a Python executable.
 
-## Usage
+`--dry-run` validates without writes. `--theme-only` is safe to repeat. `--no-theme` preserves the original patch workflow for versions without a personal profile. Combining `--theme-only` and `--no-theme` is rejected.
 
-Close Resolve before applying changes. Installations under Program Files may require an elevated terminal for file access.
+The original patch still rejects already-patched executables. Use **`--theme-only`** on your current installation. Original patch details and historical compatibility notes are in [LEGACY.md](LEGACY.md).
+
+## Automatic application and compatibility
+
+The theme runs automatically after a successful patch on this personal branch. Reapplying restores the saved theme after reinstalling the **same supported build**. It does not update Resolve, monitor installations, or guess offsets for future releases. A new Resolve build needs a newly inspected profile; unknown builds fail before patching unless `--no-theme` was explicitly selected.
+
+Preflight validates file sizes, all unmodified bytes against known build fingerprints, every replacement span, and the Fusion archive. Both the locally verified original and previously patched executable are recognized. Unrelated edits or a different theme are rejected.
+
+All theme files are validated before writes, backed up, and staged on the installation drive. Each replacement is atomic. If replacement fails, completed theme replacements are rolled back when their hashes still match. This is not a single atomic transaction across three files: interruption can require recovery from the saved manifest. If the original patch succeeds but theming fails, the original patch remains applied; fix the reported issue and rerun `--theme-only`.
+
+## Restore
+
+Backups stay under `.blackpink-backups/<session>/` in the Resolve installation. The command prints the exact manifest path. Sessions are never overwritten. Close Resolve and run:
 
 ```powershell
-# Inspect a custom installation without writing files or registry settings:
-.\target\release\resolvepatch.exe --dry-run "D:\Apps\DaVinci Resolve\Resolve.exe"
-
-# Apply to that installation:
-.\target\release\resolvepatch.exe "D:\Apps\DaVinci Resolve\Resolve.exe"
-
-# Or use automatic detection (file associations, then the default install path):
-.\target\release\resolvepatch.exe
+python .\personal\theme.py "F:\davinci\Resolve.exe" --restore "F:\davinci\.blackpink-backups\SESSION\state.json"
 ```
 
-`--help` prints usage. Exit code 0 means the requested operation completed; errors return a nonzero exit code. Dry runs still require an original, unpatched executable.
+Restore verifies backup and current-file hashes, refuses unexpected changes, and creates an undo backup. It returns files to their state before that theme session, preserving any earlier original patch. The original patch's `Resolve.exe.bak` is separate.
 
-## Backups and configuration
+## Contents and checks
 
-- A backup is created as `Resolve.exe.bak` before writing the executable. Existing backups are never overwritten: move a verified backup to a separate safe location before deliberately patching a fresh installation again.
-- The license file is written alongside Resolve, preserving prior behavior for legacy versions as well.
-- `RLM_LICENSE` is configured in the current user's environment using the license file's absolute path. Sign out and back in so applications inherit the new value. This replaces the previous attempt to write through a read-only machine registry handle.
-- License configuration failure returns an error even if the executable has already been modified. The backup remains available. Executable writes are not atomic; restore the backup if a write is interrupted.
-
-To restore, close Resolve and copy the verified `Resolve.exe.bak` over `Resolve.exe`. Remove this tool's license file and user environment setting if no longer needed; preserve any unrelated configuration.
-
-## Development checks
+Includes scripts, a build-specific recipe, compressed replacement fragments, and generated artwork. **No full Resolve executables, DLLs, Fusion archives, projects, license files, or backups are included.** Theme code does not change licensing; it retains the fork's existing patch behavior.
 
 ```powershell
 cargo +nightly fmt -- --check
 cargo +nightly test --locked
-cargo +nightly build --release --locked
+python -m unittest discover -s personal -p test_theme.py -v
+.\build-personal.ps1
 ```
 
-Regression tests cover signed relative-call bounds, malformed file-association commands, and refusal to overwrite an existing backup. They do not validate Resolve's runtime behavior.
-
-## Disclaimer
-
-This is a research project and is not intended to allow piracy.
+Tests cover repeat application, unknown inputs, corrupt assets, archive preservation, failed-replacement rollback, and restore refusal after unrelated edits. See [personal/README.md](personal/README.md) for profile/artwork details.

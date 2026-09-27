@@ -2,3 +2,10 @@
 Resolve.*bndb
 Resolve.*BinExport
 DaVinci*/
+__pycache__/
+*.pyc
+*.bak
+.blackpink-backups/
+*.theme-tmp
+*.rollback-tmp
+.blackpink.lock
